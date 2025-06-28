@@ -10,40 +10,49 @@ account_tiers = {
     "150K": {"profit_target": 9000, "max_loss_limit": 4500},
 }
 
-# === MONTE CARLO ENGINE ===
-def simulate_one_run(win_rate, risk, rr, tpd, target, mll):
-    balance = 0
-    max_drawdown = 0
-    profit_days = []
+# === MONTE-CARLO ENGINE ===
+
+def simulate_one_run(win_rate: float, risk: float, rr: float, tpd: int, target: float, mll: float):
+    """Simulate one evaluation until pass / fail and return dict."""
+    balance = 0.0
+    peak_balance = 0.0  # track equity highs for drawdown calc
+
+    profit_days = []  # store P/L per winning day for consistency rule
     day = 0
 
-    while balance < target and abs(max_drawdown) <= mll:
+    # ─── TRADING LOOP ──────────────────────────────────────────
+    while balance < target and (peak_balance - balance) <= mll:
         day += 1
-        day_pl = 0
+        day_pl = 0.0
         for _ in range(tpd):
             is_win = random.random() < win_rate
             result = risk * rr if is_win else -risk
             balance += result
             day_pl += result
-            max_drawdown = min(max_drawdown, balance)
-            if abs(max_drawdown) > mll or balance >= target:
-                break
+
+            # update peak & drawdown
+            peak_balance = max(peak_balance, balance)
+            if (peak_balance - balance) > mll:
+                return {"passed": False, "days": day, "reason": "drawdown"}
+            if balance >= target:
+                break  # stop early if target is met
+
         profit_days.append(day_pl)
-        if abs(max_drawdown) > mll:
-            return {"passed": False, "days": day}
 
+    # ─── PASS / CONSISTENCY CHECK ─────────────────────────────
     if balance >= target:
-        profit_days = [p for p in profit_days if p > 0]
-        if len(profit_days) < 2:
-            return {"passed": False, "days": day}  # consistency rule
-        lowest = min(profit_days)
-        if lowest < 0.5 * target:
-            return {"passed": False, "days": day}  # consistency rule
-        return {"passed": True, "days": day}
+        positive_days = [p for p in profit_days if p > 0]
+        if len(positive_days) < 2:
+            return {"passed": False, "days": day, "reason": "<2 profit days"}
+        lowest_prof_day = min(positive_days)
+        if lowest_prof_day < 0.5 * balance:  # 50% consistency rule
+            return {"passed": False, "days": day, "reason": "consistency"}
+        return {"passed": True, "days": day, "reason": "passed"}
 
-    return {"passed": False, "days": day}
+    return {"passed": False, "days": day, "reason": "target_not_hit"}
 
 # === STREAMLIT UI ===
+
 st.title("📊 Topstep Combine Strategy Optimizer")
 
 account = st.selectbox("Select Account Tier", list(account_tiers.keys()))
@@ -60,25 +69,25 @@ with col3:
 trades_per_day = st.slider("Trades per Day", 1, 10, 2)
 
 if st.button("Run Simulation"):
-    with st.spinner("Simulating..."):
-        results = []
-        for _ in range(SIMS):
-            res = simulate_one_run(
-                win_rate=win_rate,
-                risk=risk_per_trade,
-                rr=rr,
-                tpd=trades_per_day,
-                target=account_tiers[account]["profit_target"],
-                mll=account_tiers[account]["max_loss_limit"]
-            )
-            results.append(res)
+    with st.spinner("Simulating…"):
+        results = [simulate_one_run(win_rate, risk_per_trade, rr, trades_per_day,
+                                    account_tiers[account]["profit_target"],
+                                    account_tiers[account]["max_loss_limit"]) for _ in range(SIMS)]
 
         passes = [x for x in results if x["passed"]]
         pass_rate = round(len(passes) / SIMS * 100, 1)
         avg_days = round(np.mean([x["days"] for x in passes]), 1) if passes else None
 
         st.success(f"✅ Pass Rate: {pass_rate}%")
-        if avg_days:
-            st.info(f"📅 Avg Days to Pass: {avg_days}")
+        if avg_days is not None:
+            st.info(f"📆 Avg Days to Pass: {avg_days}")
 
-        st.bar_chart(pd.Series([x["days"] for x in passes]).value_counts().sort_index())
+        # Histogram of days to pass
+        if passes:
+            hist = pd.Series([x["days"] for x in passes]).value_counts().sort_index()
+            st.bar_chart(hist)
+
+        # Optional breakdown of fail reasons
+        with st.expander("Show fail-reason breakdown"):
+            fail_reasons = pd.Series([x["reason"] for x in results if not x["passed"]]).value_counts()
+            st.write(fail_reasons)
